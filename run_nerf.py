@@ -15,13 +15,15 @@ from ray_generation import *
 from position_encoding import *
 from hierarchical_sampliny import *
 from nerf_module import *
+from render import * 
 
 from load_blender import load_blender_data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
-
+img2mse = lambda x, y : torch.mean((x - y) ** 2)
+mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
     
 def config_parser():
 
@@ -194,6 +196,93 @@ def train():
     else:
         N_rand = args.N_rand
         use_batching = not args.no_batching     
+        rays_rgb=batching_shuffle_rays(H,W,K,i_train,poses,images)
+        i_batch=0
+        poses = torch.Tensor(poses).to(device)
+        
+        if use_batching:
+            images = torch.Tensor(images).to(device)
+            rays_rgb = torch.Tensor(rays_rgb).to(device)
+        
+        N_iters = 200000 + 1
+        start = start + 1
+        for i in trange(start,0):
+            if use_batching:
+            # Random over all images
+            # rays_rgb [(N-1)*H*W, ro+rd+rgb, 3]
+                batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+                batch = torch.transpose(batch, 0, 1)
+                batch_rays, target_s = batch[:2], batch[2]
+                i_batch += N_rand
+                if i_batch >= rays_rgb.shape[0]:
+                    #i_batch too large,shuffle rays 
+                    rand_idx = torch.randperm(rays_rgb.shape[0])
+                    rays_rgb = rays_rgb[rand_idx]
+                    i_batch = 0   
+            else:
+                # random select one picture
+                img_i = np.random.choice(i_train)
+                target = images[img_i]
+                target = torch.Tensor(target).to(device)
+                pose = poses[img_i, :3,:4]
+                if N_rand is not None:
+                    rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+                    # first args.precrop_iters steps:
+                    if i < args.precrop_iters:
+                        dH = int(H//2 * args.precrop_frac)
+                        dW = int(W//2 * args.precrop_frac)
+                        coords = torch.stack(
+                            torch.meshgrid(
+                            torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
+                            torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
+                            ), -1)               
+                    else:
+                        # all coords
+                        coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+
+                    coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
+                    select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
+                    select_coords = coords[select_inds].long()  # (N_rand, 2)
+                    rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                    rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                    batch_rays = torch.stack([rays_o, rays_d], 0)
+                    target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+            rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                verbose=i < 10, retraw=True,
+                                                **render_kwargs_train)
+            optimizer.zero_grad()
+            img_loss = img2mse(rgb, target_s)
+            loss = img_loss
+            # coarse model
+            if 'rgb0' in extras:
+                img_loss0 = img2mse(extras['rgb0'], target_s)
+                loss = loss + img_loss0
+
+            loss.backward()
+            optimizer.step()
+
+            ###   update learning rate   ###
+            decay_rate = 0.1
+            decay_steps = args.lrate_decay * 1000
+            new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = new_lrate
+            ################################   
+        global_step += 1
+        
+def batching_shuffle_rays(H,W,K,i_train,poses,images):  
+    print('get rays')
+    rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) 
+        # [N, ro+rd, H, W, 3]
+        # pose格式为[N,4,4]
+    print('done, concats')
+    rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+    rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
+    rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
+    rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+    rays_rgb = rays_rgb.astype(np.float32)
+    print('shuffle rays')
+    return np.random.shuffle(rays_rgb)     
 
 def rendervideo(args,render_poses,i_test,render_kwargs_test,start,basedir, expname, hwf, K):
     with torch.no_grad():
@@ -217,43 +306,3 @@ def rendervideo(args,render_poses,i_test,render_kwargs_test,start,basedir, expna
 if __name__=='__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     train()
-    
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
-
-    H, W, focal = hwf
-
-    if render_factor!=0:
-        # Render downsampled for speed
-        H = H//render_factor
-        W = W//render_factor
-        focal = focal/render_factor
-
-    rgbs = []
-    disps = []
-
-    t = time.time()
-    for i, c2w in enumerate(tqdm(render_poses)):
-        print(i, time.time() - t)
-        t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
-        rgbs.append(rgb.cpu().numpy())
-        disps.append(disp.cpu().numpy())
-        if i==0:
-            print(rgb.shape, disp.shape)
-
-        """
-        if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
-
-        if savedir is not None:
-            rgb8 = to8b(rgbs[-1])
-            filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
-
-
-    rgbs = np.stack(rgbs, 0)
-    disps = np.stack(disps, 0)
-
-    return rgbs, disps
