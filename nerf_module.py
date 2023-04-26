@@ -18,9 +18,9 @@ class NeRF(nn.Module):
         #eight layers 
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + 
-            [nn.Linear(W, W) for i  in range(3) ]+
+            [nn.Linear(W, W) for i  in range(4) ]+
             [ nn.Linear(W + input_ch, W) ]+ 
-            [nn.Linear(W, W) for i  in range(3) ])
+            [nn.Linear(W, W) for i  in range(2) ])
         
         self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
 
@@ -57,6 +57,6 @@ class NeRF(nn.Module):
 
         return outputs    
 
- 
+
 
 
