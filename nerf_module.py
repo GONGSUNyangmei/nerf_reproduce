@@ -57,6 +57,6 @@ class NeRF(nn.Module):
 
         return outputs    
 
-
+ 
 
 
