@@ -234,7 +234,7 @@ def create_nerf(args):
 def train(args,images, poses, render_poses, hwf, i_train, i_val, i_test,global_step,H,W,K,basedir,expname,render_kwargs_train, render_kwargs_test, grad_vars, optimizer):
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-
+    start=global_step
     # Short circuit if only rendering out from trained model
     if args.render_only:
         rendervideo(args,render_poses,i_test,render_kwargs_test,start,basedir, expname, hwf, K)
@@ -244,7 +244,7 @@ def train(args,images, poses, render_poses, hwf, i_train, i_val, i_test,global_s
     N_rand = args.N_rand
     poses = torch.Tensor(poses).to(device)
 
-
+    
     N_iters = 200000 + 1
     start = start + 1
     for i in trange(start, N_iters):
@@ -384,8 +384,6 @@ if __name__=='__main__':
     print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
     i_train, i_val, i_test = i_split
 
-    near = 2.
-    far = 6.
 
     if args.white_bkgd:
         images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
@@ -428,8 +426,8 @@ if __name__=='__main__':
     global_step = start
 
     bds_dict = {
-        'near' : near,
-        'far' : far,
+        'near' : 2,
+        'far' : 6,
     }
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
