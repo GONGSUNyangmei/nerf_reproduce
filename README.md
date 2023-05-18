@@ -5,7 +5,7 @@
 ![1](./RES/res.gif)
 ![2](./RES/nw8d8-f7gok.gif)
 
-*On the left is the duplicate result and on the right is the original result*
+*左边：复现结果；右边：原版结果*
 
 | train time      | 6.5h |
 | ----------- | ----------- |
